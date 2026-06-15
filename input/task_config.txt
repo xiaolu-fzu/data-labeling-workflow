@@ -3,6 +3,6 @@
 #   data_file: "文件名"        ← 待打标的数据文件，支持多个
 #   requirement_file: "文件名"  ← 打标需求文件，仅一个
 
-data_file: "【全量】02-非纯文本帖子（浏览量1000以上+剔除官号帖子）.xlsx"
-data_file: "【全量】03-非纯文本帖子-帖子下评论数据.xlsx"
-requirement_file: "最终-打标设计-含标签解释.xlsx"
+data_file: "非纯文本帖子（浏览量1000以上+剔除官号帖子）.xlsx"
+data_file: "非纯文本帖子-帖子下评论数据.xlsx"
+requirement_file: "打标设计-含标签解释.xlsx"

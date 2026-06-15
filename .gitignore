@@ -1,1 +1,3 @@
-runs/\n__pycache__/\n*.pyc\ninput/api.txt\n
+﻿__pycache__/
+*.pyc
+input/api.txt

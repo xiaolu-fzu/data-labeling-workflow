@@ -151,7 +151,7 @@ def find_input_files():
     return resolved, rqf, None
 
 
-def call_llm(messages, max_tokens=8192, temperature=0.3):
+def call_llm(messages, max_tokens=16384, temperature=0.3):
     import urllib.request, ssl
     payload = json.dumps({"model": MODEL, "messages": messages, "max_tokens": max_tokens, "temperature": temperature}).encode("utf-8")
     req = urllib.request.Request(API_URL, data=payload, headers={"Authorization": "Bearer " + API_KEY, "Content-Type": "application/json"})
@@ -176,33 +176,82 @@ def extract_code(response):
 
 def condense_rules(req_content):
     log("  Condensing labeling rules...")
+    
+    # Store original lines for post-check recovery
+    original_lines = req_content.split("\n")
+    
     prompt = (
-        "Reorganize these labeling rules into a clear structured format.\n"
-        "CRITICAL: Keep ALL original information. Do NOT remove, summarize, or omit any logic,\n"
-        "priority rules, edge cases, field names, value definitions, or column requirements.\n"
-        "The output must contain every single detail from the original rules.\n\n"
-        "Output in this structure:\n\n---\n"
-        "# LABEL_DEFINITIONS\n"
+        "You are a data processing assistant. Reorganize these labeling rules "
+        "into a clear structured format.\n\n"
+        "## RULES\n"
+        "1. COMPRESS descriptive text only (explanations, notes, comments).\n"
+        "2. PRESERVE ALL MAPPING TABLES completely: every row of character names, "
+        "category codes, value mappings, or any table-like data must be kept VERBATIM.\n"
+        "3. KEEP every field definition, every possible value, every label code.\n"
+        "4. KEEP all decision logic, priority rules, edge cases.\n\n"
+        "## Output structure\n\n"
+        "=== LABEL_DEFINITIONS ===\n"
         "For each label field:\n"
-        "  FIELD: field_name\n"
+        "  FIELD: name\n"
         "  TYPE: single|multi|text\n"
-        "  VALUES: every possible value with explanation\n"
-        "  LOGIC: complete decision rules, priorities, and conditions\n"
-        "  REQUIRES: exact column names needed\n"
-        "  NOTES: special cases and edge cases\n\n"
-        "# CHARACTER_TABLE\n"
-        "All character names and identifiers\n\n"
-        "# LABEL_MEANINGS\n"
-        "For each value: VALUE -> full meaning + example\n\n"
-        "---\n\nRules:\n\n" + req_content
+        "  ALL VALUES: (every value code + meaning)\n"
+        "  LOGIC: (decision rules, priorities, conditions)\n"
+        "  REQUIRES: (column names needed)\n"
+        "  NOTES: (edge cases)\n\n"
+        "=== MAPPING_TABLES ===\n"
+        "ALL mapping/table data, EVERY row preserved verbatim.\n\n"
+        "=== VALUE_MEANINGS ===\n"
+        "Code -> full meaning + example\n\n"
+        "WARNING: If you omit any mapping row, the labeling will be WRONG. "
+        "Copy ALL rows from ALL tables.\n\n"
+        "Rules:\n\n" + req_content
     )
+    
     result = call_llm([{"role": "user", "content": prompt}], max_tokens=4096, temperature=0.1)
+    
+    # Universal post-check: find "data rows" in original that are missing from result
+    # Data rows = lines with tab delimiters, or numbered items like "Row 1: ...", or lines containing "|"
+    result_text = result
+    result_set = set(result_text.split("\n"))
+    
+    missing_lines = []
+    for orig_line in original_lines:
+        stripped = orig_line.strip()
+        if not stripped or len(stripped) < 10:
+            continue
+        # Look for data-row patterns
+        is_data_row = (
+            "\t" in stripped  # tab-separated data
+            or stripped.count(" | ") >= 2  # pipe-separated
+            or stripped.startswith("Row ")  # "Row N:" format
+            or (":" in stripped[:5] and stripped[0].isdigit())  # "N: value" format
+        )
+        if not is_data_row:
+            continue
+        # Check if this line exists in result (fuzzy match)
+        found = False
+        for rl in result_set:
+            if len(rl) < 10:
+                continue
+            # Use trigram overlap for fuzzy matching
+            a_tri = set(stripped[i:i+3] for i in range(len(stripped)-2))
+            b_tri = set(rl[i:i+3] for i in range(len(rl)-2))
+            if len(a_tri) > 0 and len(a_tri & b_tri) / len(a_tri) > 0.3:
+                found = True
+                break
+        if not found:
+            missing_lines.append(orig_line)
+    
+    if missing_lines:
+        log("  Recovered %d data rows lost during condensation" % len(missing_lines))
+        result += "\n\n# === AUTO-RECOVERED (from original) ===\n"
+        for ml in missing_lines:
+            result += ml + "\n"
+    
     log("  Rules: %d -> %d chars" % (len(req_content), len(result)))
     with open(os.path.join(RUN_GEN_DIR, "condensed_rules.txt"), "w", encoding="utf-8") as f:
         f.write(result)
     return result
-
-
 def local_fix_code(code, err):
     fixed = code
     fixes = 0
@@ -254,8 +303,8 @@ def build_code_generation_prompt(tables_info, req_content):
             lines.append("    Rows: " + str(t["estimated_rows"]))
         join_keys = set()
         for t in tables_info:
-            if "帖子链接" in t["columns"]:
-                join_keys.add("帖子链接")
+            if "甯栧瓙閾炬帴" in t["columns"]:
+                join_keys.add("甯栧瓙閾炬帴")
         if join_keys:
             lines.append("CRITICAL: Merge tables by " + ", ".join(sorted(join_keys)))
             lines.append("Table 1 is MAIN. Others LEFT JOIN.")
@@ -264,8 +313,9 @@ def build_code_generation_prompt(tables_info, req_content):
         lines.append("File: " + first_file)
 
     lines.append("")
-    lines.append("Input dir: " + ind)
-    lines.append("Output dir: " + od)
+    lines.append("Input dir: INPUT_DIR (variable provided at runtime)")
+    lines.append("Output dir: OUTPUT_DIR (variable provided at runtime)")
+    lines.append("CRITICAL: Do NOT hardcode directory paths. Use the variables INPUT_DIR and OUTPUT_DIR directly.")
     lines.append("")
     lines.append("AVAILABLE columns: " + str(main_info["columns"]))
     lines.append("Sample (first 5 rows): " + str(main_info["preview"]))
@@ -283,9 +333,10 @@ def build_code_generation_prompt(tables_info, req_content):
         lines.append("- Read ALL tables, MERGE by join key, then apply labels")
     lines.append("- Apply rules, add new columns with Chinese names")
     lines.append("- Multi-select: join values with semicolon")
-    lines.append("- Save: df.to_excel(os.path.join(output_dir, output_name), index=False)")
+    lines.append("- Save at the END: df_posts.to_excel(os.path.join(OUTPUT_DIR, output_name), index=False)")
     lines.append("- Output name: [Labeled] " + first_file)
     lines.append("- Keep all original columns")
+    lines.append("- End with: df_posts.to_excel(...) after ALL labeling is done")
     lines.append("- Use absolute paths")
     lines.append("")
     lines.append("## Code Quality")
@@ -442,7 +493,7 @@ def main():
         f.write(prompt)
 
     log("  Waiting for DeepSeek...")
-    response = call_llm([{"role": "user", "content": prompt}], max_tokens=8192)
+    response = call_llm([{"role": "user", "content": prompt}], max_tokens=16384)
     generated_code = extract_code(response)
     log("  Code: %d chars" % len(generated_code))
 
